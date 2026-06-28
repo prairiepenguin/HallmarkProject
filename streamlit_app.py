@@ -147,18 +147,6 @@ def get_year_bounds() -> tuple[int, int]:
 
 
 @st.cache_data(show_spinner=False)
-def get_networks() -> list[str]:
-    rows = get_connection().execute(
-        """
-        SELECT DISTINCT network
-        FROM movies
-        WHERE network IS NOT NULL AND TRIM(network) <> ''
-        ORDER BY network
-        """
-    ).fetchall()
-    return [row["network"] for row in rows]
-
-
 @st.cache_data(show_spinner=False)
 def get_roles() -> list[str]:
     rows = get_connection().execute(
@@ -228,7 +216,7 @@ def search_movies(search: str) -> pd.DataFrame:
     if not term:
         return load_frame(
             """
-            SELECT movie_id, title, year, original_air_date, network
+            SELECT movie_id, title, year, original_air_date
             FROM movies
             ORDER BY COALESCE(year, 0) DESC, title COLLATE NOCASE
             LIMIT 75
@@ -237,7 +225,7 @@ def search_movies(search: str) -> pd.DataFrame:
 
     return load_frame(
         """
-        SELECT movie_id, title, year, original_air_date, network
+        SELECT movie_id, title, year, original_air_date
         FROM movies
         WHERE LOWER(title) LIKE ?
         ORDER BY
@@ -311,7 +299,6 @@ def sidebar_filters(alias: str = "m") -> tuple[str, tuple]:
     search = st.sidebar.text_input("Movie title contains")
     year_range = st.sidebar.slider("Year", min_year, max_year, (min_year, max_year))
     decades = st.sidebar.multiselect("Decade", decade_options, format_func=lambda d: f"{d}s")
-    networks = st.sidebar.multiselect("Network", get_networks())
     tmdb_status = st.sidebar.selectbox("TMDB status", ["Any", "Matched", "Unmatched"])
     roles = st.sidebar.multiselect("Credit role", get_roles())
     sources = st.sidebar.multiselect("Credit source", get_sources())
@@ -330,9 +317,6 @@ def sidebar_filters(alias: str = "m") -> tuple[str, tuple]:
             params.extend([decade, decade + 9])
         where.append("(" + " OR ".join(decade_parts) + ")")
 
-    if networks:
-        where.append(f"{alias}.network IN ({placeholders(networks)})")
-        params.extend(networks)
 
     if tmdb_status == "Matched":
         where.append(f"{alias}.tmdb_match_found = 1")
@@ -363,12 +347,12 @@ def movie_button_rows(frame: pd.DataFrame, key_prefix: str, title_col: str = "ti
         st.caption("No movies found.")
         return
 
-    list_header("Movie", "Year", "Network")
+    list_header("Movie", "Year")
     for idx, row in enumerate(frame.itertuples(index=False)):
         data = row._asdict()
         year = data.get("year")
         label_year = "Unknown" if pd.isna(year) else str(int(year))
-        cols = st.columns([4, 1, 2])
+        cols = st.columns([5, 1])
         cols[0].button(
             data[title_col],
             key=f"{key_prefix}-{idx}-{data[id_col]}",
@@ -377,7 +361,6 @@ def movie_button_rows(frame: pd.DataFrame, key_prefix: str, title_col: str = "ti
             use_container_width=True,
         )
         cols[1].markdown(f'<div class="hp-muted">{label_year}</div>', unsafe_allow_html=True)
-        cols[2].markdown(f'<div class="hp-muted">{data.get("network") or ""}</div>', unsafe_allow_html=True)
 
 
 def person_button_rows(frame: pd.DataFrame, key_prefix: str, name_col: str, id_col: str, metric_col: str) -> None:
@@ -434,7 +417,6 @@ def movies_view(where_clause: str, params: tuple) -> None:
             m.title,
             m.year,
             m.original_air_date,
-            m.network,
             m.tmdb_title,
             m.tmdb_release_date,
             ROUND(m.tmdb_similarity, 3) AS tmdb_similarity,
@@ -447,7 +429,7 @@ def movies_view(where_clause: str, params: tuple) -> None:
         tuple(local_params),
     )
 
-    movie_button_rows(movies[["movie_id", "title", "year", "network"]], "movies-list")
+    movie_button_rows(movies[["movie_id", "title", "year"]], "movies-list")
     with st.expander("Table view"):
         st.dataframe(movies, use_container_width=True, hide_index=True)
 
@@ -479,6 +461,51 @@ def get_movie_creatives(movie_id: int) -> pd.DataFrame:
     )
 
 
+def credit_button_grid(credits: pd.DataFrame, roles: tuple[str, ...], label: str, key_prefix: str) -> None:
+    group = credits[credits["role"].isin(roles)]
+    st.markdown(f"**{label}**")
+    if group.empty:
+        st.caption(f"No {label.lower()} credits found in this database.")
+        return
+
+    cols = st.columns(3)
+    for idx, person in enumerate(group.itertuples(index=False)):
+        role_note = "" if len(roles) == 1 else f" ({person.role})"
+        cols[idx % 3].button(
+            f"{person.name}{role_note}",
+            key=f"{key_prefix}-{label}-{idx}-{person.person_id}-{person.role}",
+            on_click=open_person,
+            args=(int(person.person_id),),
+            use_container_width=True,
+        )
+
+
+def related_movie_rows(frame: pd.DataFrame, key_prefix: str) -> None:
+    if frame.empty:
+        st.caption("No related creative-team movies found.")
+        return
+
+    header = st.columns([3, 1, 3, 2])
+    for col, label in zip(header, ["Movie", "Year", "Shared People", "Connection"]):
+        col.markdown(f'<div class="hp-list-header">{label}</div>', unsafe_allow_html=True)
+
+    for idx, row in enumerate(frame.itertuples(index=False)):
+        cols = st.columns([3, 1, 3, 2])
+        cols[0].button(
+            row.title,
+            key=f"{key_prefix}-{idx}-{row.movie_id}",
+            on_click=open_movie,
+            args=(int(row.movie_id),),
+            use_container_width=True,
+        )
+        cols[1].markdown(
+            f'<div class="hp-muted">{"Unknown" if pd.isna(row.year) else int(row.year)}</div>',
+            unsafe_allow_html=True,
+        )
+        cols[2].markdown(f'<div class="hp-muted">{row.shared_people or ""}</div>', unsafe_allow_html=True)
+        cols[3].markdown(f'<div class="hp-muted">{row.connection_types or ""}</div>', unsafe_allow_html=True)
+
+
 def movie_detail_page(movie_id: int) -> None:
     movie = load_frame(
         """
@@ -494,14 +521,13 @@ def movie_detail_page(movie_id: int) -> None:
 
     row = movie.iloc[0]
     st.button("Back to explorer", on_click=back_to_explorer)
-    page_header(row.title, "Explorer / Movie", "Cast, creative credits, TMDB match details, and related movies.")
+    page_header(row.title, "Explorer / Movie", "Directors, writers, cast, TMDB match details, and related creative-team movies.")
 
-    cols = st.columns(5)
+    cols = st.columns(4)
     cols[0].metric("Year", "Unknown" if pd.isna(row.year) else f"{int(row.year)}")
     cols[1].metric("Air Date", row.original_air_date or "Unknown")
-    cols[2].metric("Network", row.network or "Unknown")
-    cols[3].metric("TMDB Match", "Yes" if row.tmdb_match_found else "No")
-    cols[4].metric("TMDB Similarity", "Unknown" if pd.isna(row.tmdb_similarity) else f"{row.tmdb_similarity:.3f}")
+    cols[2].metric("TMDB Match", "Yes" if row.tmdb_match_found else "No")
+    cols[3].metric("TMDB Similarity", "Unknown" if pd.isna(row.tmdb_similarity) else f"{row.tmdb_similarity:.3f}")
 
     credits = load_frame(
         """
@@ -518,32 +544,51 @@ def movie_detail_page(movie_id: int) -> None:
     )
 
     st.subheader("Credits")
-    for role in ["Director", "Writer", "Screenplay", "Teleplay", "Story", "Actor"]:
-        group = credits[credits["role"] == role]
-        if group.empty:
-            continue
-        st.markdown(f"**{role}**")
-        cols = st.columns(3)
-        for idx, person in enumerate(group.itertuples(index=False)):
-            cols[idx % 3].button(person.name, key=f"movie-{movie_id}-{role}-{person.person_id}", on_click=open_person, args=(int(person.person_id),), use_container_width=True)
+    credit_button_grid(credits, ("Director",), "Directors", f"movie-{movie_id}")
+    credit_button_grid(credits, WRITING_ROLES, "Writing", f"movie-{movie_id}")
+    credit_button_grid(credits, ("Actor",), "Cast", f"movie-{movie_id}")
 
     related = load_frame(
         f"""
-        SELECT DISTINCT m.movie_id, m.title, m.year, m.network
-        FROM movies m
-        JOIN credits c ON c.movie_id = m.movie_id
-        WHERE m.movie_id <> ?
-            AND c.person_id IN (
-                SELECT person_id FROM credits WHERE movie_id = ? AND role IN ({placeholders(CREATIVE_ROLES)})
-            )
-            AND c.role IN ({placeholders(CREATIVE_ROLES)})
-        ORDER BY COALESCE(m.year, 0) DESC, m.title COLLATE NOCASE
+        WITH selected_creatives AS (
+            SELECT DISTINCT person_id
+            FROM credits
+            WHERE movie_id = ? AND role IN ({placeholders(CREATIVE_ROLES)})
+        ), related_connections AS (
+            SELECT
+                m.movie_id,
+                m.title,
+                m.year,
+                    p.name,
+                CASE
+                    WHEN c.role = 'Director' THEN 'Director'
+                    WHEN c.role IN ({placeholders(WRITING_ROLES)}) THEN 'Writer'
+                    WHEN c.role = 'Actor' THEN 'Actor'
+                    ELSE c.role
+                END AS connection_type
+            FROM movies m
+            JOIN credits c ON c.movie_id = m.movie_id
+            JOIN selected_creatives sc ON sc.person_id = c.person_id
+            JOIN people p ON p.person_id = c.person_id
+            WHERE m.movie_id <> ? AND c.role IN ({placeholders(CREATIVE_ROLES)})
+        )
+        SELECT
+            movie_id,
+            title,
+            year,
+            GROUP_CONCAT(DISTINCT name) AS shared_people,
+            GROUP_CONCAT(DISTINCT connection_type) AS connection_types,
+            COUNT(DISTINCT name) AS shared_count
+        FROM related_connections
+        GROUP BY movie_id, title, year
+        ORDER BY shared_count DESC, COALESCE(year, 0) DESC, title COLLATE NOCASE
         LIMIT 30
         """,
-        (movie_id, movie_id, *CREATIVE_ROLES, *CREATIVE_ROLES),
+        (movie_id, *CREATIVE_ROLES, *WRITING_ROLES, movie_id, *CREATIVE_ROLES),
     )
     st.subheader("Related Creative-Team Movies")
-    movie_button_rows(related, f"related-{movie_id}")
+    st.caption("These movies share at least one director, writer, or actor with this title. The connection columns explain why each movie appears here.")
+    related_movie_rows(related, f"related-{movie_id}")
 
 
 def get_person_role_films(person_id: int, roles: tuple[str, ...]) -> pd.DataFrame:
@@ -556,13 +601,12 @@ def get_person_role_films(person_id: int, roles: tuple[str, ...]) -> pd.DataFram
             GROUP_CONCAT(DISTINCT c.role) AS roles,
             GROUP_CONCAT(DISTINCT c.source) AS sources,
             m.original_air_date,
-            m.network,
             m.tmdb_title,
             m.tmdb_release_date
         FROM credits c
         JOIN movies m ON m.movie_id = c.movie_id
         WHERE c.person_id = ? AND c.role IN ({placeholders(roles)})
-        GROUP BY m.movie_id, m.title, m.year, m.original_air_date, m.network, m.tmdb_title, m.tmdb_release_date
+        GROUP BY m.movie_id, m.title, m.year, m.original_air_date, m.tmdb_title, m.tmdb_release_date
         ORDER BY COALESCE(m.year, 0) DESC, m.title COLLATE NOCASE
         """,
         (person_id, *roles),
@@ -662,13 +706,12 @@ def person_profile(person_id: int) -> None:
             GROUP_CONCAT(DISTINCT c.role) AS roles,
             GROUP_CONCAT(DISTINCT c.source) AS sources,
             m.original_air_date,
-            m.network,
             m.tmdb_title,
             m.tmdb_release_date
         FROM credits c
         JOIN movies m ON m.movie_id = c.movie_id
         WHERE c.person_id = ?
-        GROUP BY m.movie_id, m.title, m.year, m.original_air_date, m.network, m.tmdb_title, m.tmdb_release_date
+        GROUP BY m.movie_id, m.title, m.year, m.original_air_date, m.tmdb_title, m.tmdb_release_date
         ORDER BY COALESCE(m.year, 0) DESC, m.title COLLATE NOCASE
         """,
         (person_id,),
@@ -706,7 +749,7 @@ def person_profile(person_id: int) -> None:
 
     with tab_movies:
         st.subheader("Movie Credits")
-        movie_button_rows(credits[["movie_id", "title", "year", "network"]], f"person-movies-{person_id}")
+        movie_button_rows(credits[["movie_id", "title", "year"]], f"person-movies-{person_id}")
         with st.expander("Table view"):
             st.dataframe(credits, hide_index=True, use_container_width=True)
 
@@ -717,7 +760,7 @@ def person_page(person_id: int) -> None:
 
 
 def trends_view(where_clause: str, params: tuple) -> None:
-    page_header("Trends", "Analysis", "Explore patterns by year, network, director, writer, and recurring creative teams.")
+    page_header("Trends", "Analysis", "Explore patterns by year, director, writer, and recurring creative teams.")
     by_year = load_frame(
         f"""
         SELECT m.year, COUNT(*) AS movies
@@ -725,17 +768,6 @@ def trends_view(where_clause: str, params: tuple) -> None:
         WHERE {where_clause} AND m.year IS NOT NULL
         GROUP BY m.year
         ORDER BY m.year
-        """,
-        params,
-    )
-    by_network = load_frame(
-        f"""
-        SELECT COALESCE(NULLIF(TRIM(m.network), ''), 'Unknown') AS network, COUNT(*) AS movies
-        FROM movies m
-        WHERE {where_clause}
-        GROUP BY COALESCE(NULLIF(TRIM(m.network), ''), 'Unknown')
-        ORDER BY movies DESC, network
-        LIMIT 20
         """,
         params,
     )
@@ -790,13 +822,8 @@ def trends_view(where_clause: str, params: tuple) -> None:
     overview_tab, directors_tab, writers_tab, teams_tab = st.tabs(["Overview", "Directors", "Writers", "Frequent Teams"])
 
     with overview_tab:
-        left, right = st.columns([2, 1])
-        with left:
-            st.subheader("Movies by Year")
-            st.bar_chart(by_year, x="year", y="movies", use_container_width=True)
-        with right:
-            st.subheader("Top Networks")
-            st.dataframe(by_network, hide_index=True, use_container_width=True)
+        st.subheader("Movies by Year")
+        st.bar_chart(by_year, x="year", y="movies", use_container_width=True)
 
     with directors_tab:
         st.subheader("Movies by Director")
@@ -969,7 +996,7 @@ def data_quality_view() -> None:
             LIMIT 300
             """
         )
-        movie_button_rows(missing[["movie_id", "title", "year"]].assign(network=""), "quality-missing")
+        movie_button_rows(missing[["movie_id", "title", "year"]], "quality-missing")
         with st.expander("Table view"):
             st.dataframe(missing, hide_index=True, use_container_width=True)
 
