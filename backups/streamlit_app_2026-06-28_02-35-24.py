@@ -108,25 +108,7 @@ def get_connection() -> sqlite3.Connection:
 
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA temp_store = MEMORY")
-    conn.execute("PRAGMA cache_size = -64000")
-    ensure_performance_indexes(conn)
     return conn
-
-
-def ensure_performance_indexes(conn: sqlite3.Connection) -> None:
-    conn.executescript(
-        """
-        CREATE INDEX IF NOT EXISTS idx_credits_role_movie_person
-            ON credits(role, movie_id, person_id);
-        CREATE INDEX IF NOT EXISTS idx_credits_role_person_movie
-            ON credits(role, person_id, movie_id);
-        CREATE INDEX IF NOT EXISTS idx_credits_movie_role_person
-            ON credits(movie_id, role, person_id);
-        CREATE INDEX IF NOT EXISTS idx_movies_year_air_title
-            ON movies(year, original_air_date, title);
-        """
-    )
 
 
 @st.cache_data(show_spinner=False)
@@ -385,11 +367,10 @@ def person_button_rows(frame: pd.DataFrame, key_prefix: str, name_col: str, id_c
         st.caption("No people found.")
         return
 
-    metric_label = metric_col.replace("_", " ").title()
-    list_header("Person", metric_label)
+    list_header("Person", metric_col.replace("_", " ").title())
     for idx, row in enumerate(frame.itertuples(index=False)):
         data = row._asdict()
-        cols = st.columns([5, 1])
+        cols = st.columns([4, 1])
         cols[0].button(
             data[name_col],
             key=f"{key_prefix}-{idx}-{data[id_col]}",
@@ -397,23 +378,17 @@ def person_button_rows(frame: pd.DataFrame, key_prefix: str, name_col: str, id_c
             args=(int(data[id_col]),),
             use_container_width=True,
         )
-        cols[1].markdown(
-            f'<div class="hp-compact-count">{data[metric_col]:,.0f}</div>',
-            unsafe_allow_html=True,
-        )
+        cols[1].metric(metric_col.replace("_", " ").title(), f"{data[metric_col]:,.0f}")
 
 
 def person_search_view() -> None:
     page_header("Find a Person", "Search", "Start with directors and writers, then switch roles when you want to explore more people.")
-    filter_col, search_col = st.columns([1, 2])
-    with filter_col:
-        role_group = st.selectbox(
-            "Person type",
-            ["Directors", "Writers", "Actors", "All People"],
-            key="person_lookup_role_group",
-        )
-    with search_col:
-        search = st.text_input("Search by name", key="person_lookup_search")
+    role_group = st.selectbox(
+        "Person type",
+        ["Directors", "Writers", "Actors", "All People"],
+        key="person_lookup_role_group",
+    )
+    search = st.text_input("Search by name", key="person_lookup_search")
     person_button_rows(search_people(search, role_group), "person-search", "name", "person_id", "credits")
 
 
@@ -820,118 +795,71 @@ def trends_view(where_clause: str, params: tuple) -> None:
 
 def teams_dashboard() -> None:
     page_header("Frequent Creative Teams", "Teams", "Compare recurring creative partnerships across directors, writers, and actors.")
-    team_type = st.radio(
+    team_type = st.selectbox(
         "Team type",
-        ["Director + Writer", "Director + Actor", "Writer + Actor"],
-        horizontal=True,
+        ["Director + Writer", "Director + Actor", "Actor Pairs", "Writer + Actor"],
     )
-    result_limit = int(st.slider("Results", 10, 75, 10, 5))
 
     if team_type == "Director + Writer":
         query = f"""
-            WITH frequent_directors AS (
-                SELECT person_id
-                FROM credits
-                WHERE role = 'Director'
-                GROUP BY person_id
-                ORDER BY COUNT(DISTINCT movie_id) DESC
-                LIMIT 150
-            ), frequent_writers AS (
-                SELECT person_id
-                FROM credits
-                WHERE role IN ({placeholders(WRITING_ROLES)})
-                GROUP BY person_id
-                ORDER BY COUNT(DISTINCT movie_id) DESC
-                LIMIT 250
-            )
             SELECT d.person_id AS first_id, d.name AS first_name, w.person_id AS second_id, w.name AS second_name,
-                   COUNT(DISTINCT dc.movie_id) AS movies_together, MAX(m.year) AS latest_year
-            FROM credits dc
-            JOIN frequent_directors fd ON fd.person_id = dc.person_id
-            JOIN credits wc ON wc.movie_id = dc.movie_id AND wc.role IN ({placeholders(WRITING_ROLES)})
-            JOIN frequent_writers fw ON fw.person_id = wc.person_id
-            JOIN movies m ON m.movie_id = dc.movie_id
+                   COUNT(DISTINCT m.movie_id) AS movies_together, MAX(m.year) AS latest_year
+            FROM movies m
+            JOIN credits dc ON dc.movie_id = m.movie_id AND dc.role = 'Director'
             JOIN people d ON d.person_id = dc.person_id
+            JOIN credits wc ON wc.movie_id = m.movie_id AND wc.role IN ({placeholders(WRITING_ROLES)})
             JOIN people w ON w.person_id = wc.person_id
-            WHERE dc.role = 'Director' AND d.person_id <> w.person_id
+            WHERE d.person_id <> w.person_id
             GROUP BY d.person_id, d.name, w.person_id, w.name
             ORDER BY movies_together DESC, latest_year DESC
-            LIMIT {result_limit}
+            LIMIT 100
         """
-        params = (*WRITING_ROLES, *WRITING_ROLES)
+        params = WRITING_ROLES
     elif team_type == "Director + Actor":
-        query = f"""
-            WITH frequent_directors AS (
-                SELECT person_id
-                FROM credits
-                WHERE role = 'Director'
-                GROUP BY person_id
-                ORDER BY COUNT(DISTINCT movie_id) DESC
-                LIMIT 150
-            ), frequent_actors AS (
-                SELECT person_id
-                FROM credits
-                WHERE role = 'Actor'
-                GROUP BY person_id
-                HAVING COUNT(DISTINCT movie_id) >= 4
-                ORDER BY COUNT(DISTINCT movie_id) DESC
-                LIMIT 250
-            )
+        query = """
             SELECT d.person_id AS first_id, d.name AS first_name, a.person_id AS second_id, a.name AS second_name,
-                   COUNT(DISTINCT dc.movie_id) AS movies_together, MAX(m.year) AS latest_year
-            FROM credits dc
-            JOIN frequent_directors fd ON fd.person_id = dc.person_id
-            JOIN credits ac ON ac.movie_id = dc.movie_id AND ac.role = 'Actor'
-            JOIN frequent_actors fa ON fa.person_id = ac.person_id
-            JOIN movies m ON m.movie_id = dc.movie_id
+                   COUNT(DISTINCT m.movie_id) AS movies_together, MAX(m.year) AS latest_year
+            FROM movies m
+            JOIN credits dc ON dc.movie_id = m.movie_id AND dc.role = 'Director'
             JOIN people d ON d.person_id = dc.person_id
+            JOIN credits ac ON ac.movie_id = m.movie_id AND ac.role = 'Actor'
             JOIN people a ON a.person_id = ac.person_id
-            WHERE dc.role = 'Director'
             GROUP BY d.person_id, d.name, a.person_id, a.name
             ORDER BY movies_together DESC, latest_year DESC
-            LIMIT {result_limit}
+            LIMIT 100
+        """
+        params = ()
+    elif team_type == "Actor Pairs":
+        query = """
+            SELECT a.person_id AS first_id, a.name AS first_name, b.person_id AS second_id, b.name AS second_name,
+                   COUNT(DISTINCT m.movie_id) AS movies_together, MAX(m.year) AS latest_year
+            FROM movies m
+            JOIN credits ac ON ac.movie_id = m.movie_id AND ac.role = 'Actor'
+            JOIN people a ON a.person_id = ac.person_id
+            JOIN credits bc ON bc.movie_id = m.movie_id AND bc.role = 'Actor' AND bc.person_id > ac.person_id
+            JOIN people b ON b.person_id = bc.person_id
+            GROUP BY a.person_id, a.name, b.person_id, b.name
+            ORDER BY movies_together DESC, latest_year DESC
+            LIMIT 100
         """
         params = ()
     else:
         query = f"""
-            WITH frequent_writers AS (
-                SELECT person_id
-                FROM credits
-                WHERE role IN ({placeholders(WRITING_ROLES)})
-                GROUP BY person_id
-                ORDER BY COUNT(DISTINCT movie_id) DESC
-                LIMIT 250
-            ), frequent_actors AS (
-                SELECT person_id
-                FROM credits
-                WHERE role = 'Actor'
-                GROUP BY person_id
-                HAVING COUNT(DISTINCT movie_id) >= 4
-                ORDER BY COUNT(DISTINCT movie_id) DESC
-                LIMIT 250
-            )
             SELECT w.person_id AS first_id, w.name AS first_name, a.person_id AS second_id, a.name AS second_name,
-                   COUNT(DISTINCT wc.movie_id) AS movies_together, MAX(m.year) AS latest_year
-            FROM credits wc
-            JOIN frequent_writers fw ON fw.person_id = wc.person_id
-            JOIN credits ac ON ac.movie_id = wc.movie_id AND ac.role = 'Actor'
-            JOIN frequent_actors fa ON fa.person_id = ac.person_id
-            JOIN movies m ON m.movie_id = wc.movie_id
+                   COUNT(DISTINCT m.movie_id) AS movies_together, MAX(m.year) AS latest_year
+            FROM movies m
+            JOIN credits wc ON wc.movie_id = m.movie_id AND wc.role IN ({placeholders(WRITING_ROLES)})
             JOIN people w ON w.person_id = wc.person_id
+            JOIN credits ac ON ac.movie_id = m.movie_id AND ac.role = 'Actor'
             JOIN people a ON a.person_id = ac.person_id
-            WHERE wc.role IN ({placeholders(WRITING_ROLES)}) AND w.person_id <> a.person_id
+            WHERE w.person_id <> a.person_id
             GROUP BY w.person_id, w.name, a.person_id, a.name
             ORDER BY movies_together DESC, latest_year DESC
-            LIMIT {result_limit}
+            LIMIT 100
         """
-        params = (*WRITING_ROLES, *WRITING_ROLES)
+        params = WRITING_ROLES
 
     teams = load_frame(query, tuple(params))
-
-    if teams.empty:
-        st.caption("No frequent teams found for this selection.")
-        return
-
     for row in teams.itertuples(index=False):
         cols = st.columns([3, 3, 1, 1])
         cols[0].button(row.first_name, key=f"team-first-{team_type}-{row.first_id}-{row.second_id}", on_click=open_person, args=(int(row.first_id),), use_container_width=True)

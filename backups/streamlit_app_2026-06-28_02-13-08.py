@@ -19,87 +19,6 @@ st.set_page_config(
 )
 
 
-
-def apply_theme() -> None:
-    st.markdown(
-        """
-        <style>
-            .block-container {
-                padding-top: 2rem;
-                padding-bottom: 3rem;
-                max-width: 1320px;
-            }
-            [data-testid="stSidebar"] {
-                border-right: 1px solid #ece7ea;
-            }
-            [data-testid="stMetric"] {
-                background: #fbfafb;
-                border: 1px solid #eee7eb;
-                border-radius: 8px;
-                padding: 0.85rem 1rem;
-            }
-            div.stButton > button {
-                border-radius: 8px;
-                border-color: #ded7dc;
-                min-height: 2.65rem;
-                text-align: left;
-                justify-content: flex-start;
-            }
-            div.stButton > button:hover {
-                border-color: #B83280;
-                color: #B83280;
-            }
-            .hp-eyebrow {
-                color: #7b7078;
-                font-size: 0.82rem;
-                text-transform: uppercase;
-                letter-spacing: 0.08em;
-                margin-bottom: 0.15rem;
-            }
-            .hp-page-title {
-                font-size: 2rem;
-                font-weight: 720;
-                line-height: 1.15;
-                margin-bottom: 0.2rem;
-            }
-            .hp-page-copy {
-                color: #655c63;
-                font-size: 1rem;
-                margin-bottom: 1.15rem;
-            }
-            .hp-list-header {
-                color: #7b7078;
-                font-size: 0.82rem;
-                text-transform: uppercase;
-                letter-spacing: 0.04em;
-                border-bottom: 1px solid #eee7eb;
-                padding-bottom: 0.35rem;
-                margin-bottom: 0.35rem;
-            }
-            .hp-muted {
-                color: #766d74;
-                font-size: 0.92rem;
-            }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def page_header(title: str, eyebrow: str = "", copy: str = "") -> None:
-    if eyebrow:
-        st.markdown(f'<div class="hp-eyebrow">{eyebrow}</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="hp-page-title">{title}</div>', unsafe_allow_html=True)
-    if copy:
-        st.markdown(f'<div class="hp-page-copy">{copy}</div>', unsafe_allow_html=True)
-
-
-def list_header(*labels: str) -> None:
-    cols = st.columns([4, 1, 2][: len(labels)])
-    for col, label in zip(cols, labels):
-        col.markdown(f'<div class="hp-list-header">{label}</div>', unsafe_allow_html=True)
-
-
 @st.cache_resource
 def get_connection() -> sqlite3.Connection:
     if not DB_PATH.exists():
@@ -108,25 +27,7 @@ def get_connection() -> sqlite3.Connection:
 
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA temp_store = MEMORY")
-    conn.execute("PRAGMA cache_size = -64000")
-    ensure_performance_indexes(conn)
     return conn
-
-
-def ensure_performance_indexes(conn: sqlite3.Connection) -> None:
-    conn.executescript(
-        """
-        CREATE INDEX IF NOT EXISTS idx_credits_role_movie_person
-            ON credits(role, movie_id, person_id);
-        CREATE INDEX IF NOT EXISTS idx_credits_role_person_movie
-            ON credits(role, person_id, movie_id);
-        CREATE INDEX IF NOT EXISTS idx_credits_movie_role_person
-            ON credits(movie_id, role, person_id);
-        CREATE INDEX IF NOT EXISTS idx_movies_year_air_title
-            ON movies(year, original_air_date, title);
-        """
-    )
 
 
 @st.cache_data(show_spinner=False)
@@ -176,49 +77,34 @@ def get_sources() -> list[str]:
 
 
 @st.cache_data(show_spinner=False)
-def search_people(search: str, role_group: str = "Directors") -> pd.DataFrame:
+def search_people(search: str) -> pd.DataFrame:
     term = search.strip().lower()
-    role_map = {
-        "Directors": ("Director",),
-        "Writers": WRITING_ROLES,
-        "Actors": ("Actor",),
-        "All People": tuple(),
-    }
-    roles = role_map.get(role_group, ("Director",))
-
-    joins = "JOIN credits c ON c.person_id = p.person_id" if roles else "LEFT JOIN credits c ON c.person_id = p.person_id"
-    where = []
-    params: list = []
-
-    if roles:
-        where.append(f"c.role IN ({placeholders(roles)})")
-        params.extend(roles)
-
-    if term:
-        where.append("LOWER(p.name) LIKE ?")
-        params.append(f"%{term}%")
-
-    where_sql = "WHERE " + " AND ".join(where) if where else ""
-    ranking_sql = ""
-    if term:
-        ranking_sql = "CASE WHEN LOWER(p.name) = ? THEN 0 WHEN LOWER(p.name) LIKE ? THEN 1 ELSE 2 END,"
-        params.extend([term, f"{term}%"])
+    if not term:
+        return load_frame(
+            """
+            SELECT p.person_id, p.name, COUNT(DISTINCT c.movie_id) AS credits
+            FROM people p
+            LEFT JOIN credits c ON c.person_id = p.person_id
+            GROUP BY p.person_id, p.name
+            ORDER BY credits DESC, p.name COLLATE NOCASE
+            LIMIT 75
+            """
+        )
 
     return load_frame(
-        f"""
+        """
         SELECT p.person_id, p.name, COUNT(DISTINCT c.movie_id) AS credits
         FROM people p
-        {joins}
-        {where_sql}
+        LEFT JOIN credits c ON c.person_id = p.person_id
+        WHERE LOWER(p.name) LIKE ?
         GROUP BY p.person_id, p.name
-        HAVING credits > 0
         ORDER BY
-            {ranking_sql}
+            CASE WHEN LOWER(p.name) = ? THEN 0 WHEN LOWER(p.name) LIKE ? THEN 1 ELSE 2 END,
             credits DESC,
             p.name COLLATE NOCASE
         LIMIT 75
         """,
-        tuple(params),
+        (f"%{term}%", term, f"{term}%"),
     )
 
 
@@ -363,21 +249,14 @@ def movie_button_rows(frame: pd.DataFrame, key_prefix: str, title_col: str = "ti
         st.caption("No movies found.")
         return
 
-    list_header("Movie", "Year", "Network")
-    for idx, row in enumerate(frame.itertuples(index=False)):
+    for row in frame.itertuples(index=False):
         data = row._asdict()
         year = data.get("year")
         label_year = "Unknown" if pd.isna(year) else str(int(year))
         cols = st.columns([4, 1, 2])
-        cols[0].button(
-            data[title_col],
-            key=f"{key_prefix}-{idx}-{data[id_col]}",
-            on_click=open_movie,
-            args=(int(data[id_col]),),
-            use_container_width=True,
-        )
-        cols[1].markdown(f'<div class="hp-muted">{label_year}</div>', unsafe_allow_html=True)
-        cols[2].markdown(f'<div class="hp-muted">{data.get("network") or ""}</div>', unsafe_allow_html=True)
+        cols[0].button(data[title_col], key=f"{key_prefix}-{data[id_col]}", on_click=open_movie, args=(int(data[id_col]),), use_container_width=True)
+        cols[1].write(label_year)
+        cols[2].write(data.get("network") or "")
 
 
 def person_button_rows(frame: pd.DataFrame, key_prefix: str, name_col: str, id_col: str, metric_col: str) -> None:
@@ -385,11 +264,9 @@ def person_button_rows(frame: pd.DataFrame, key_prefix: str, name_col: str, id_c
         st.caption("No people found.")
         return
 
-    metric_label = metric_col.replace("_", " ").title()
-    list_header("Person", metric_label)
     for idx, row in enumerate(frame.itertuples(index=False)):
         data = row._asdict()
-        cols = st.columns([5, 1])
+        cols = st.columns([4, 1])
         cols[0].button(
             data[name_col],
             key=f"{key_prefix}-{idx}-{data[id_col]}",
@@ -397,36 +274,22 @@ def person_button_rows(frame: pd.DataFrame, key_prefix: str, name_col: str, id_c
             args=(int(data[id_col]),),
             use_container_width=True,
         )
-        cols[1].markdown(
-            f'<div class="hp-compact-count">{data[metric_col]:,.0f}</div>',
-            unsafe_allow_html=True,
-        )
+        cols[1].metric(metric_col.replace("_", " ").title(), f"{data[metric_col]:,.0f}")
+
+
+def movie_search_view() -> None:
+    st.subheader("Find a Movie")
+    search = st.text_input("Search by title", key="movie_lookup_search")
+    movie_button_rows(search_movies(search), "movie-search")
 
 
 def person_search_view() -> None:
-    page_header("Find a Person", "Search", "Start with directors and writers, then switch roles when you want to explore more people.")
-    filter_col, search_col = st.columns([1, 2])
-    with filter_col:
-        role_group = st.selectbox(
-            "Person type",
-            ["Directors", "Writers", "Actors", "All People"],
-            key="person_lookup_role_group",
-        )
-    with search_col:
-        search = st.text_input("Search by name", key="person_lookup_search")
-    person_button_rows(search_people(search, role_group), "person-search", "name", "person_id", "credits")
+    st.subheader("Find a Person")
+    search = st.text_input("Search by name", key="person_lookup_search")
+    person_button_rows(search_people(search), "person-search", "name", "person_id", "credits")
 
 
 def movies_view(where_clause: str, params: tuple) -> None:
-    page_header("Movies", "Browse", "Search and filter Hallmark titles, then open a full movie page for credits and related movies.")
-    quick_search = st.text_input("Search movie titles", key="movies_page_search")
-
-    local_where = where_clause
-    local_params = list(params)
-    if quick_search.strip():
-        local_where = f"({local_where}) AND LOWER(m.title) LIKE ?"
-        local_params.append(f"%{quick_search.strip().lower()}%")
-
     movies = load_frame(
         f"""
         SELECT
@@ -440,13 +303,14 @@ def movies_view(where_clause: str, params: tuple) -> None:
             ROUND(m.tmdb_similarity, 3) AS tmdb_similarity,
             m.tmdb_match_found
         FROM movies m
-        WHERE {local_where}
+        WHERE {where_clause}
         ORDER BY COALESCE(m.year, 0) DESC, m.title COLLATE NOCASE
         LIMIT 500
         """,
-        tuple(local_params),
+        params,
     )
 
+    st.subheader("Movies")
     movie_button_rows(movies[["movie_id", "title", "year", "network"]], "movies-list")
     with st.expander("Table view"):
         st.dataframe(movies, use_container_width=True, hide_index=True)
@@ -494,7 +358,7 @@ def movie_detail_page(movie_id: int) -> None:
 
     row = movie.iloc[0]
     st.button("Back to explorer", on_click=back_to_explorer)
-    page_header(row.title, "Explorer / Movie", "Cast, creative credits, TMDB match details, and related movies.")
+    st.header(row.title)
 
     cols = st.columns(5)
     cols[0].metric("Year", "Unknown" if pd.isna(row.year) else f"{int(row.year)}")
@@ -644,7 +508,7 @@ def person_profile(person_id: int) -> None:
         (person_id,),
     )
 
-    page_header(person_name, "Explorer / Person", "Role counts, career timeline, collaborations, and movie credits.")
+    st.header(person_name)
     if role_summary.empty:
         st.caption("No credits found for this person.")
         return
@@ -717,7 +581,6 @@ def person_page(person_id: int) -> None:
 
 
 def trends_view(where_clause: str, params: tuple) -> None:
-    page_header("Trends", "Analysis", "Explore patterns by year, network, director, writer, and recurring creative teams.")
     by_year = load_frame(
         f"""
         SELECT m.year, COUNT(*) AS movies
@@ -819,119 +682,72 @@ def trends_view(where_clause: str, params: tuple) -> None:
 
 
 def teams_dashboard() -> None:
-    page_header("Frequent Creative Teams", "Teams", "Compare recurring creative partnerships across directors, writers, and actors.")
-    team_type = st.radio(
+    st.subheader("Frequent Creative Teams")
+    team_type = st.selectbox(
         "Team type",
-        ["Director + Writer", "Director + Actor", "Writer + Actor"],
-        horizontal=True,
+        ["Director + Writer", "Director + Actor", "Actor Pairs", "Writer + Actor"],
     )
-    result_limit = int(st.slider("Results", 10, 75, 10, 5))
 
     if team_type == "Director + Writer":
         query = f"""
-            WITH frequent_directors AS (
-                SELECT person_id
-                FROM credits
-                WHERE role = 'Director'
-                GROUP BY person_id
-                ORDER BY COUNT(DISTINCT movie_id) DESC
-                LIMIT 150
-            ), frequent_writers AS (
-                SELECT person_id
-                FROM credits
-                WHERE role IN ({placeholders(WRITING_ROLES)})
-                GROUP BY person_id
-                ORDER BY COUNT(DISTINCT movie_id) DESC
-                LIMIT 250
-            )
             SELECT d.person_id AS first_id, d.name AS first_name, w.person_id AS second_id, w.name AS second_name,
-                   COUNT(DISTINCT dc.movie_id) AS movies_together, MAX(m.year) AS latest_year
-            FROM credits dc
-            JOIN frequent_directors fd ON fd.person_id = dc.person_id
-            JOIN credits wc ON wc.movie_id = dc.movie_id AND wc.role IN ({placeholders(WRITING_ROLES)})
-            JOIN frequent_writers fw ON fw.person_id = wc.person_id
-            JOIN movies m ON m.movie_id = dc.movie_id
+                   COUNT(DISTINCT m.movie_id) AS movies_together, MAX(m.year) AS latest_year
+            FROM movies m
+            JOIN credits dc ON dc.movie_id = m.movie_id AND dc.role = 'Director'
             JOIN people d ON d.person_id = dc.person_id
+            JOIN credits wc ON wc.movie_id = m.movie_id AND wc.role IN ({placeholders(WRITING_ROLES)})
             JOIN people w ON w.person_id = wc.person_id
-            WHERE dc.role = 'Director' AND d.person_id <> w.person_id
+            WHERE d.person_id <> w.person_id
             GROUP BY d.person_id, d.name, w.person_id, w.name
             ORDER BY movies_together DESC, latest_year DESC
-            LIMIT {result_limit}
+            LIMIT 100
         """
-        params = (*WRITING_ROLES, *WRITING_ROLES)
+        params = WRITING_ROLES
     elif team_type == "Director + Actor":
-        query = f"""
-            WITH frequent_directors AS (
-                SELECT person_id
-                FROM credits
-                WHERE role = 'Director'
-                GROUP BY person_id
-                ORDER BY COUNT(DISTINCT movie_id) DESC
-                LIMIT 150
-            ), frequent_actors AS (
-                SELECT person_id
-                FROM credits
-                WHERE role = 'Actor'
-                GROUP BY person_id
-                HAVING COUNT(DISTINCT movie_id) >= 4
-                ORDER BY COUNT(DISTINCT movie_id) DESC
-                LIMIT 250
-            )
+        query = """
             SELECT d.person_id AS first_id, d.name AS first_name, a.person_id AS second_id, a.name AS second_name,
-                   COUNT(DISTINCT dc.movie_id) AS movies_together, MAX(m.year) AS latest_year
-            FROM credits dc
-            JOIN frequent_directors fd ON fd.person_id = dc.person_id
-            JOIN credits ac ON ac.movie_id = dc.movie_id AND ac.role = 'Actor'
-            JOIN frequent_actors fa ON fa.person_id = ac.person_id
-            JOIN movies m ON m.movie_id = dc.movie_id
+                   COUNT(DISTINCT m.movie_id) AS movies_together, MAX(m.year) AS latest_year
+            FROM movies m
+            JOIN credits dc ON dc.movie_id = m.movie_id AND dc.role = 'Director'
             JOIN people d ON d.person_id = dc.person_id
+            JOIN credits ac ON ac.movie_id = m.movie_id AND ac.role = 'Actor'
             JOIN people a ON a.person_id = ac.person_id
-            WHERE dc.role = 'Director'
             GROUP BY d.person_id, d.name, a.person_id, a.name
             ORDER BY movies_together DESC, latest_year DESC
-            LIMIT {result_limit}
+            LIMIT 100
+        """
+        params = ()
+    elif team_type == "Actor Pairs":
+        query = """
+            SELECT a.person_id AS first_id, a.name AS first_name, b.person_id AS second_id, b.name AS second_name,
+                   COUNT(DISTINCT m.movie_id) AS movies_together, MAX(m.year) AS latest_year
+            FROM movies m
+            JOIN credits ac ON ac.movie_id = m.movie_id AND ac.role = 'Actor'
+            JOIN people a ON a.person_id = ac.person_id
+            JOIN credits bc ON bc.movie_id = m.movie_id AND bc.role = 'Actor' AND bc.person_id > ac.person_id
+            JOIN people b ON b.person_id = bc.person_id
+            GROUP BY a.person_id, a.name, b.person_id, b.name
+            ORDER BY movies_together DESC, latest_year DESC
+            LIMIT 100
         """
         params = ()
     else:
         query = f"""
-            WITH frequent_writers AS (
-                SELECT person_id
-                FROM credits
-                WHERE role IN ({placeholders(WRITING_ROLES)})
-                GROUP BY person_id
-                ORDER BY COUNT(DISTINCT movie_id) DESC
-                LIMIT 250
-            ), frequent_actors AS (
-                SELECT person_id
-                FROM credits
-                WHERE role = 'Actor'
-                GROUP BY person_id
-                HAVING COUNT(DISTINCT movie_id) >= 4
-                ORDER BY COUNT(DISTINCT movie_id) DESC
-                LIMIT 250
-            )
             SELECT w.person_id AS first_id, w.name AS first_name, a.person_id AS second_id, a.name AS second_name,
-                   COUNT(DISTINCT wc.movie_id) AS movies_together, MAX(m.year) AS latest_year
-            FROM credits wc
-            JOIN frequent_writers fw ON fw.person_id = wc.person_id
-            JOIN credits ac ON ac.movie_id = wc.movie_id AND ac.role = 'Actor'
-            JOIN frequent_actors fa ON fa.person_id = ac.person_id
-            JOIN movies m ON m.movie_id = wc.movie_id
+                   COUNT(DISTINCT m.movie_id) AS movies_together, MAX(m.year) AS latest_year
+            FROM movies m
+            JOIN credits wc ON wc.movie_id = m.movie_id AND wc.role IN ({placeholders(WRITING_ROLES)})
             JOIN people w ON w.person_id = wc.person_id
+            JOIN credits ac ON ac.movie_id = m.movie_id AND ac.role = 'Actor'
             JOIN people a ON a.person_id = ac.person_id
-            WHERE wc.role IN ({placeholders(WRITING_ROLES)}) AND w.person_id <> a.person_id
+            WHERE w.person_id <> a.person_id
             GROUP BY w.person_id, w.name, a.person_id, a.name
             ORDER BY movies_together DESC, latest_year DESC
-            LIMIT {result_limit}
+            LIMIT 100
         """
-        params = (*WRITING_ROLES, *WRITING_ROLES)
+        params = WRITING_ROLES
 
     teams = load_frame(query, tuple(params))
-
-    if teams.empty:
-        st.caption("No frequent teams found for this selection.")
-        return
-
     for row in teams.itertuples(index=False):
         cols = st.columns([3, 3, 1, 1])
         cols[0].button(row.first_name, key=f"team-first-{team_type}-{row.first_id}-{row.second_id}", on_click=open_person, args=(int(row.first_id),), use_container_width=True)
@@ -941,7 +757,7 @@ def teams_dashboard() -> None:
 
 
 def data_quality_view() -> None:
-    page_header("Data Quality", "Maintenance", "Find missing values, TMDB review candidates, possible duplicates, and source conflicts.")
+    st.subheader("Data Quality")
     summary = load_frame(
         """
         SELECT
@@ -1037,95 +853,7 @@ def about_view() -> None:
     st.markdown(about_path.read_text(encoding="utf-8"))
 
 
-
-def home_dashboard() -> None:
-    page_header(
-        "Welcome to The Hallmark Project",
-        "Discover",
-        "Find your next comfort watch, follow familiar faces, and explore the creative teams behind Hallmark movies.",
-    )
-
-    popular_people = load_frame(
-        """
-        SELECT p.person_id, p.name, COUNT(DISTINCT c.movie_id) AS credits
-        FROM people p
-        JOIN credits c ON c.person_id = p.person_id
-        WHERE c.role = 'Director'
-        GROUP BY p.person_id, p.name
-        HAVING credits >= 10
-        ORDER BY RANDOM()
-        LIMIT 3
-        """
-    )
-
-
-    st.subheader("Start Exploring")
-    prompt_cols = st.columns(3)
-    with prompt_cols[0]:
-        st.markdown("**Browse the movie library**")
-        st.caption("Search by title and jump into cast, writers, directors, and related movies.")
-        if st.button("Browse movies", key="home-go-movies", use_container_width=True):
-            st.session_state.pending_nav = "Movies"
-            st.rerun()
-    with prompt_cols[1]:
-        st.markdown("**Follow familiar faces**")
-        st.caption("Start with directors and writers, then branch out into actors and collaborators.")
-        if st.button("Search people", key="home-go-people", use_container_width=True):
-            st.session_state.pending_nav = "Person Search"
-            st.rerun()
-    with prompt_cols[2]:
-        st.markdown("**See who works together**")
-        st.caption("Browse recurring director, writer, and actor pairings.")
-        if st.button("Explore teams", key="home-go-teams", use_container_width=True):
-            st.session_state.pending_nav = "Teams"
-            st.rerun()
-
-    quick_movie, quick_person = st.columns(2)
-    with quick_movie:
-        st.subheader("Quick Movie Search")
-        movie_term = st.text_input("Movie title", key="home_movie_search")
-        movie_button_rows(search_movies(movie_term).head(6), "home-movie")
-
-    with quick_person:
-        st.subheader("Directors You Might Recognize")
-        person_term = st.text_input("Person name", key="home_person_search")
-        if person_term.strip():
-            person_button_rows(search_people(person_term, "Directors").head(6), "home-person", "name", "person_id", "credits")
-        else:
-            person_button_rows(popular_people, "home-featured-person", "name", "person_id", "credits")
-
-    st.subheader("Browse by Mood")
-    mood_cols = st.columns(4)
-    moods = [
-        ("Newest Movies", "Movies"),
-        ("Top Directors", "Trends"),
-        ("Frequent Teams", "Teams"),
-        ("Behind the Credits", "Person Search"),
-    ]
-    for idx, (label, target) in enumerate(moods):
-        with mood_cols[idx]:
-            if st.button(label, key=f"home-mood-{idx}", use_container_width=True):
-                st.session_state.pending_nav = target
-                st.rerun()
-
-def render_sidebar_nav() -> str:
-    st.sidebar.title("The Hallmark Project")
-    nav_options = ["Home", "Movies", "Person Search", "Trends", "Teams", "Data Quality", "About", "SQL"]
-    pending_nav = st.session_state.pop("pending_nav", None)
-    if pending_nav in nav_options:
-        st.session_state.main_nav = pending_nav
-
-    page = st.sidebar.radio(
-        "Navigate",
-        nav_options,
-        key="main_nav",
-    )
-    st.sidebar.divider()
-    return page
-
-
 def main() -> None:
-    apply_theme()
     st.title("The Hallmark Project")
     st.caption("Explore Hallmark movies, people, credits, and creative collaborations.")
 
@@ -1137,25 +865,35 @@ def main() -> None:
         movie_detail_page(int(st.session_state.selected_movie_id))
         return
 
-    page = render_sidebar_nav()
+    metric_row()
+    where_clause, params = sidebar_filters("m")
 
-    if page == "Home":
-        home_dashboard()
-    elif page == "Person Search":
+    tabs = st.tabs([
+        "Movie Search",
+        "Person Search",
+        "Movies",
+        "Trends",
+        "Teams",
+        "Data Quality",
+        "About",
+        "SQL",
+    ])
+
+    with tabs[0]:
+        movie_search_view()
+    with tabs[1]:
         person_search_view()
-    elif page == "Movies":
-        where_clause, params = sidebar_filters("m")
+    with tabs[2]:
         movies_view(where_clause, params)
-    elif page == "Trends":
-        where_clause, params = sidebar_filters("m")
+    with tabs[3]:
         trends_view(where_clause, params)
-    elif page == "Teams":
+    with tabs[4]:
         teams_dashboard()
-    elif page == "Data Quality":
+    with tabs[5]:
         data_quality_view()
-    elif page == "About":
+    with tabs[6]:
         about_view()
-    elif page == "SQL":
+    with tabs[7]:
         raw_sql_view()
 
 

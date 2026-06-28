@@ -4,7 +4,7 @@ Streamlit app for exploring Hallmark movies, people, credits, and creative colla
 
 ## Database
 
-The app expects `hallmark.db` to live in the same folder as `app.py`.
+The app expects `hallmark.db` to live in the same folder as `streamlit_app.py`.
 
 Current tables:
 
@@ -14,6 +14,8 @@ Current tables:
 
 ## Features
 
+- Start from a Home dashboard with quick search, project metrics, and recent movies
+- Navigate with a sidebar menu instead of a crowded top tab row
 - Search for movies and open dedicated movie detail pages
 - Search for people and open dedicated person profile pages
 - Click movie titles, directors, writers, actors, and collaborators throughout the app
@@ -29,14 +31,14 @@ Current tables:
 
 ```bash
 pip install -r requirements.txt
-streamlit run app.py
+streamlit run streamlit_app.py
 ```
 
 ## Deploy to Streamlit Community Cloud
 
-1. Push this folder to GitHub, including `app.py`, `requirements.txt`, `.streamlit/config.toml`, and `hallmark.db`.
+1. Push this folder to GitHub, including `streamlit_app.py`, `requirements.txt`, `.streamlit/config.toml`, `ABOUT.md`, and `hallmark.db`.
 2. In Streamlit Community Cloud, create a new app from the GitHub repository.
-3. Set the main file path to `app.py`.
+3. Set the main file path to `streamlit_app.py`.
 4. Deploy.
 
 No secrets are required for the current local SQLite version.
